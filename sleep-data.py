@@ -5,32 +5,38 @@ from dotenv import load_dotenv, dotenv_values
 import pytz
 import os
 
-# Constants
-local_tz = pytz.timezone("America/New_York")
+# --- Timezone: Europe/Paris ---
+local_tz = pytz.timezone("Europe/Paris")
+utc = pytz.UTC
 
 # Load environment variables
 load_dotenv()
 CONFIG = dotenv_values()
 
 def get_sleep_data(garmin):
-    today = datetime.today().date()
-    return garmin.get_sleep_data(today.isoformat())
+    # Prend "aujourd'hui" en heure de Paris (évite les décalages été/hiver)
+    today_paris = datetime.now(local_tz).date()
+    return garmin.get_sleep_data(today_paris.isoformat())
 
 def format_duration(seconds):
     minutes = (seconds or 0) // 60
     return f"{minutes // 60}h {minutes % 60}m"
 
 def format_time(timestamp):
+    """Retourne un ISO 8601 en UTC (Z) pour Notion."""
     return (
         datetime.utcfromtimestamp(timestamp / 1000).strftime("%Y-%m-%dT%H:%M:%S.000Z")
         if timestamp else None
     )
 
 def format_time_readable(timestamp):
-    return (
-        datetime.fromtimestamp(timestamp / 1000, local_tz).strftime("%H:%M")
-        if timestamp else "Unknown"
-    )
+    """Affichage lisible en heure de Paris (ex: 22:35)."""
+    if not timestamp:
+        return "Unknown"
+    # Les timestamps Garmin sont en ms depuis l'epoch, "GMT"/UTC.
+    dt_utc = datetime.fromtimestamp(timestamp / 1000, tz=utc)
+    dt_paris = dt_utc.astimezone(local_tz)
+    return dt_paris.strftime("%H:%M")
 
 def format_date_for_name(sleep_date):
     return datetime.strptime(sleep_date, "%Y-%m-%d").strftime("%d.%m.%Y") if sleep_date else "Unknown"
@@ -41,7 +47,7 @@ def sleep_data_exists(client, database_id, sleep_date):
         filter={"property": "Long Date", "date": {"equals": sleep_date}}
     )
     results = query.get('results', [])
-    return results[0] if results else None  # Ensure it returns None instead of causing IndexError
+    return results[0] if results else None
 
 def create_sleep_data(client, database_id, sleep_data, skip_zero_sleep=True):
     daily_sleep = sleep_data.get('dailySleepDTO', {})
@@ -53,7 +59,6 @@ def create_sleep_data(client, database_id, sleep_data, skip_zero_sleep=True):
         (daily_sleep.get(k, 0) or 0) for k in ['deepSleepSeconds', 'lightSleepSeconds', 'remSleepSeconds']
     )
     
-    
     if skip_zero_sleep and total_sleep == 0:
         print(f"Skipping sleep data for {sleep_date} as total sleep is 0")
         return
@@ -62,6 +67,7 @@ def create_sleep_data(client, database_id, sleep_data, skip_zero_sleep=True):
         "Date": {"title": [{"text": {"content": format_date_for_name(sleep_date)}}]},
         "Times": {"rich_text": [{"text": {"content": f"{format_time_readable(daily_sleep.get('sleepStartTimestampGMT'))} → {format_time_readable(daily_sleep.get('sleepEndTimestampGMT'))}"}}]},
         "Long Date": {"date": {"start": sleep_date}},
+        # On garde ici des timestamps ISO en UTC (Z) pour Notion (fiable et standard)
         "Full Date/Time": {"date": {"start": format_time(daily_sleep.get('sleepStartTimestampGMT')), "end": format_time(daily_sleep.get('sleepEndTimestampGMT'))}},
         "Total Sleep (h)": {"number": round(total_sleep / 3600, 1)},
         "Light Sleep (h)": {"number": round(daily_sleep.get('lightSleepSeconds', 0) / 3600, 1)},
@@ -82,13 +88,20 @@ def create_sleep_data(client, database_id, sleep_data, skip_zero_sleep=True):
 def main():
     load_dotenv()
 
+    # (Optionnel) Forcer la TZ de l’environnement pour les libs qui lisent os.environ["TZ"]
+    os.environ["TZ"] = "Europe/Paris"
+    try:
+        import time
+        time.tzset()
+    except Exception:
+        pass
+
     # Initialize Garmin and Notion clients using environment variables
     garmin_email = os.getenv("GARMIN_EMAIL")
     garmin_password = os.getenv("GARMIN_PASSWORD")
     notion_token = os.getenv("NOTION_TOKEN")
     database_id = os.getenv("NOTION_SLEEP_DB_ID")
 
-    # Initialize Garmin client and login
     garmin = Garmin(garmin_email, garmin_password)
     garmin.login()
     client = Client(auth=notion_token)
